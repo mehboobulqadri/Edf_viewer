@@ -12,10 +12,17 @@ class EDFViewer(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("EDF Viewer v0.3 - Manual Plot")
+        self.setWindowTitle("EDF Viewer v0.4 - Time Window Plot")
         self.setGeometry(100, 100, 1200, 800)
 
-        # This setup is correct and remains the same
+        # --- Application State Variables ---
+        # These will control what part of the data we are looking at.
+        self.raw = None
+        self.current_start_time = 0.0  # Start at the beginning of the file
+        self.window_duration = 10.0    # Show 10 seconds of data at a time
+        self.max_channels_to_display = 20 # Limit channels to avoid clutter
+
+        # --- GUI Setup ---
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         self.layout = QVBoxLayout(central_widget)
@@ -27,61 +34,63 @@ class EDFViewer(QMainWindow):
         self.layout.addWidget(self.toolbar)
         self.layout.addWidget(self.canvas)
 
-        # --- Load the data when the app starts ---
-        # In the future, a "Load File" button will do this.
-        self.load_and_plot_data()
+        self.load_sample_data()
+        # Initial plot after loading
+        self.plot_eeg_data()
 
-    def load_and_plot_data(self):
-        """Loads data and calls the plotting function."""
+    def load_sample_data(self):
+        """Loads the MNE sample dataset into self.raw."""
         print("Loading MNE sample data...")
         files = eegbci.load_data(subject=1, runs=[6], update_path=True)
         self.raw = mne.io.read_raw_edf(files[0], preload=True)
-        
-        # We only want to see the EEG channels for this example
-        self.raw.pick_types(eeg=True)
-        
-        # Now, plot the data we just loaded
-        self.plot_eeg_data()
+        self.raw.pick_types(eeg=True) # We only want EEG channels
 
     def plot_eeg_data(self):
-        """
-        Extracts data from the raw object and plots it on the canvas.
-        This is the manual plotting method.
-        """
-        print("Manually plotting EEG data...")
+        """Plots the data for the currently selected time window."""
+        if self.raw is None:
+            return # Don't plot if no data is loaded
+
+        # --- Calculate Time and Data Slice ---
+        sfreq = self.raw.info['sfreq']
+        start_sample = int(self.current_start_time * sfreq)
+        stop_sample = int((self.current_start_time + self.window_duration) * sfreq)
+
+        # Get the slice of data for the window
+        # We also limit the number of channels here using pick
+        ch_names_to_plot = self.raw.ch_names[:self.max_channels_to_display]
+        data, times = self.raw.get_data(
+            picks=ch_names_to_plot,
+            start=start_sample,
+            stop=stop_sample,
+            return_times=True
+        )
+
+        # --- Plotting ---
         self.figure.clear()
         ax = self.figure.add_subplot(111)
-
-        # Get the EEG data and times
-        data, times = self.raw.get_data(return_times=True)
         
-        # --- Plotting Logic ---
-        # To prevent signals from overlapping, we'll stack them vertically.
-        # We calculate an offset based on the average peak-to-peak amplitude.
-        ch_names = self.raw.ch_names
-        n_channels = len(ch_names)
+        offset = np.std(data) * 3
+        tick_locs = []
         
-        # Calculate a reasonable offset
-        offset = np.std(data) * 3 # An offset of 3 standard deviations
-        tick_locs = [] # To store y-axis tick locations
-        
-        for i, ch_name in enumerate(ch_names):
+        for i, ch_name in enumerate(ch_names_to_plot):
             y = data[i]
-            y_offset = i * offset
-            ax.plot(times, y - y_offset, lw=0.5, color='black')
-            tick_locs.append(-y_offset)
+            ax.plot(times, y - (i * offset), lw=0.5, color='black')
+            tick_locs.append(-(i * offset))
 
         # --- Formatting the Plot ---
         ax.set_yticks(tick_locs)
-        ax.set_yticklabels(ch_names)
-        ax.tick_params(axis='y', length=0) # Hide y-axis ticks
+        ax.set_yticklabels(ch_names_to_plot)
+        ax.tick_params(axis='y', length=0)
         ax.set_xlabel("Time (s)")
-        ax.set_title("EEG Signals")
-        ax.set_ylim(-offset * n_channels, offset) # Adjust y-limits for visibility
+        ax.set_title(f"EEG Signals ({self.current_start_time:.2f}s - {self.current_start_time + self.window_duration:.2f}s)")
         ax.grid(True, which='both', axis='y', linestyle=':')
+        
+        # Adjust y-limits for visibility, leaving a little space
+        ax.set_ylim(-(offset * len(ch_names_to_plot)), offset)
 
         self.canvas.draw()
-        print("Plotting complete.")
+        print(f"Plot updated to show window: {self.current_start_time}s to {self.current_start_time + self.window_duration}s")
+
 
 # --- Main Application Execution ---
 if __name__ == '__main__':
