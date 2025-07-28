@@ -1,30 +1,41 @@
-import mne
-from mne.datasets import eegbci
+import sys
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget
 
-# --- Using a sample MNE dataset ---
+# All our application's GUI components will go inside this class
+class EDFViewer(QMainWindow):
+    def __init__(self):
+        # This calls the constructor of the parent class (QMainWindow)
+        super().__init__()
 
-# 1. Define which subject and run from the BCI dataset we want.
-# We'll use subject 1, run 6 which corresponds to an eyes open/closed task.
-subject = 1
-runs = [6]
+        # --- Window Properties ---
+        self.setWindowTitle("EDF Viewer v0.1")
+        # Set the initial size of the window (width, height in pixels)
+        self.setGeometry(100, 100, 1200, 800) # x-pos, y-pos, width, height
 
-# 2. Download the data. MNE will handle caching it for future use.
-# This function returns a list of file paths for the downloaded data.
-print("Fetching dataset from MNE...")
-files = eegbci.load_data(subject, runs, update_path=True)
-print(f"Dataset downloaded to: {files[0]}")
+        # --- Central Widget ---
+        # QMainWindow needs a "central widget" to hold all other elements.
+        # We'll create a simple QWidget for this for now.
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
 
-# 3. Load the downloaded EDF file into MNE's 'raw' object.
-# We use the first file from the list returned.
-# preload=True loads all the data into memory at once.
-raw = mne.io.read_raw_edf(files[0], preload=True)
+        # In the next steps, we will add layouts and other widgets
+        # (like buttons and plots) to this central_widget.
 
-# 4. Print some basic information about the file to the console.
-print("\nFile loaded successfully!")
-print(raw.info)
+# This is the standard boilerplate for running a PyQt application
+if __name__ == '__main__':
+    # 1. Create the Application object.
+    #    sys.argv allows passing command-line arguments to the application.
+    app = QApplication(sys.argv)
 
-# 5. Generate and display the interactive plot of the raw data.
-# This will open a new window showing the signals.
-print("\nShowing plot...")
-raw.plot(block=True)
-print("Plot window closed. Program finished.")
+    # 2. Create an instance of our main window.
+    main_window = EDFViewer()
+
+    # 3. Show the window.
+    main_window.show()
+
+    # 4. Start the application's event loop.
+    #    This loop waits for user actions (like clicks) and stops the script
+    #    from exiting immediately. The window will stay open until you close it.
+    #    The sys.exit() ensures a clean exit.
+    sys.exit(app.exec())
+
