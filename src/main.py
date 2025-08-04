@@ -10,7 +10,7 @@ from PyQt6.QtGui import (
     QDoubleValidator, QFont, QKeySequence, QAction, QColor
 )
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu
     QPushButton, QFileDialog, QLineEdit, QLabel, QScrollBar, QStatusBar,
     QComboBox, QGroupBox, QMessageBox, QCheckBox, QFrame,
     QToolBar, QDialog, QListWidget, QListWidgetItem,
