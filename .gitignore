@@ -29,6 +29,7 @@ wheels/
 *.egg
 MANIFEST
 .log
+edf_viewer_errors.log
 
 # VS Code
 .vscode/
