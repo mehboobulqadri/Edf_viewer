@@ -19,6 +19,7 @@ import time
 import logging
 from pathlib import Path
 from typing import List, Tuple
+import datetime
 
 # Optimize Matplotlib for performance
 mpl.rcParams['path.simplify'] = True
@@ -521,6 +522,33 @@ class EDFViewer(QMainWindow):
             logging.error(f"Error in _validate_and_plot: {e}")
             QMessageBox.critical(self, "Plot Error", f"Failed to update plot:\n{e}")
 
+    def export_annotations_csv(self):
+        if not self.annotations and not self.section_highlights:
+            QMessageBox.information(self, "No Annotations", "No annotations or highlights to export.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Export Annotations to CSV", "", "CSV Files (*.csv)")
+        if file_path:
+            now = datetime.datetime.now().isoformat()
+            annotation_data = {
+                'onset': self.annotations.onset,
+                'duration': self.annotations.duration,
+                'description': self.annotations.description,
+                'channel': [''] * len(self.annotations.onset),
+                'color': [''] * len(self.annotations.onset),
+                'saved_at': [now] * len(self.annotations.onset)
+            }
+            highlight_data = {
+                'onset': [h[1] for h in self.section_highlights],
+                'duration': [h[2] for h in self.section_highlights],
+                'description': ['Highlight'] * len(self.section_highlights),
+                'channel': [h[0] for h in self.section_highlights],
+                'color': [h[3].name() if hasattr(h[3], 'name') else '' for h in self.section_highlights],
+                'saved_at': [now] * len(self.section_highlights)
+            }
+            df = pd.concat([pd.DataFrame(annotation_data), pd.DataFrame(highlight_data)], ignore_index=True)
+            df.to_csv(file_path, index=False)
+            self.status_label.setText(f"Annotations exported to {file_path}")
+
     def plot_eeg_data(self):
         if self.raw is None or not self.channel_indices:
             return
@@ -555,12 +583,16 @@ class EDFViewer(QMainWindow):
                 ax.set_yticks(tick_locs)
                 ax.set_yticklabels(ch_names)
                 y_min, y_max = ax.get_ylim()
+                # Draw annotation regions and labels
                 for onset, duration, description in zip(self.annotations.onset, self.annotations.duration, self.annotations.description):
                     if onset < view_end and onset + duration > view_start:
                         if duration == 0:
                             ax.axvline(onset, color='green', linestyle='--', alpha=0.6)
+                            ax.text(onset, y_max, str(description), color='green', fontsize=8, va='top', ha='left', rotation=90, clip_on=True)
                         else:
                             ax.axvspan(onset, onset + duration, color='green', alpha=0.3)
+                            ax.text(onset + duration/2, y_max, str(description), color='green', fontsize=8, va='top', ha='center', clip_on=True)
+                # Draw highlights and their labels
                 for ch_name, onset, duration, color in self.section_highlights:
                     if onset < view_end and onset + duration > view_start and ch_name in ch_names:
                         ch_idx = ch_names.index(ch_name)
@@ -572,8 +604,10 @@ class EDFViewer(QMainWindow):
                         ymax = (ymax_data - y_min) / (y_max - y_min)
                         if duration == 0:
                             ax.axvline(onset, ymin=ymin, ymax=ymax, color=color.name(), linestyle='--', alpha=0.6)
+                            ax.text(onset, y_center, ch_name, color=color.name(), fontsize=8, va='bottom', ha='left', rotation=90, clip_on=True)
                         else:
                             ax.axvspan(onset, onset + duration, ymin=ymin, ymax=ymax, color=color.name(), alpha=0.4)
+                            ax.text(onset + duration/2, y_center, ch_name, color=color.name(), fontsize=8, va='bottom', ha='center', clip_on=True)
                 ax.axvspan(self.focus_start_time, self.focus_start_time + self.focus_duration, color='yellow', alpha=0.4, zorder=0)
             ax.set_xlim(view_start, view_end)
             ax.set_xlabel("Time (s)")
@@ -720,17 +754,22 @@ class EDFViewer(QMainWindow):
             return
         file_path, _ = QFileDialog.getSaveFileName(self, "Export Annotations to CSV", "", "CSV Files (*.csv)")
         if file_path:
+            now = datetime.datetime.now().isoformat()
             annotation_data = {
                 'onset': self.annotations.onset,
                 'duration': self.annotations.duration,
                 'description': self.annotations.description,
-                'channel': [''] * len(self.annotations.onset)
+                'channel': [''] * len(self.annotations.onset),
+                'color': [''] * len(self.annotations.onset),
+                'saved_at': [now] * len(self.annotations.onset)
             }
             highlight_data = {
                 'onset': [h[1] for h in self.section_highlights],
                 'duration': [h[2] for h in self.section_highlights],
                 'description': ['Highlight'] * len(self.section_highlights),
-                'channel': [h[0] for h in self.section_highlights]
+                'channel': [h[0] for h in self.section_highlights],
+                'color': [h[3].name() if hasattr(h[3], 'name') else '' for h in self.section_highlights],
+                'saved_at': [now] * len(self.section_highlights)
             }
             df = pd.concat([pd.DataFrame(annotation_data), pd.DataFrame(highlight_data)], ignore_index=True)
             df.to_csv(file_path, index=False)
