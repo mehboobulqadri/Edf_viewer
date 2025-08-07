@@ -176,12 +176,13 @@ class AnnotationManagerDialog(QDialog):
         main_layout = QVBoxLayout(self)
 
         self.annotation_list = QListWidget()
-        self.annotation_list.setSelectionMode(QListWidget.ExtendedSelection)
+        # FIX: Use correct PyQt6 enum for selection mode
+        self.annotation_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         main_layout.addWidget(QLabel("General Annotations:"))
         main_layout.addWidget(self.annotation_list)
 
         self.highlight_list = QListWidget()
-        self.highlight_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.highlight_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         main_layout.addWidget(QLabel("Channel-Specific Highlights:"))
         main_layout.addWidget(self.highlight_list)
 
@@ -215,8 +216,8 @@ class AnnotationManagerDialog(QDialog):
         selected_highlights = [item.data(Qt.ItemDataRole.UserRole) for item in self.highlight_list.selectedItems()]
 
         if selected_annotations:
-            indices = [idx for _, idx in selected_annotations]
-            mask = np.ones(len(self.parent().annotations), dtype=bool)
+            indices = [idx for typ, idx in selected_annotations if typ == 'annotation']
+            mask = np.ones(len(self.parent().annotations.onset), dtype=bool)
             mask[indices] = False
             self.parent().annotations = mne.Annotations(
                 onset=self.parent().annotations.onset[mask],
@@ -225,7 +226,7 @@ class AnnotationManagerDialog(QDialog):
             )
 
         if selected_highlights:
-            indices = [idx for _, idx in selected_highlights]
+            indices = [idx for typ, idx in selected_highlights if typ == 'highlight']
             self.parent().section_highlights = [h for i, h in enumerate(self.parent().section_highlights) if i not in indices]
 
         self.load_annotations()
@@ -583,9 +584,7 @@ class EDFViewer(QMainWindow):
             QMessageBox.critical(self, "Plot Error", f"Failed to plot EEG data:\n{e}")
 
     def keyPressEvent(self, event):
-        # Use Qt.Key enum from PyQt6.QtCore.Qt.Key
         key = event.key()
-        # PyQt6: Key enums are in Qt.Key.Key_*
         if self.raw is None or self.duration_input.hasFocus() or self.step_input.hasFocus():
             super().keyPressEvent(event)
             return
@@ -598,11 +597,15 @@ class EDFViewer(QMainWindow):
             self.view_start_time = max(self.view_start_time - pan_amount, 0)
             self._validate_and_plot()
         elif key == Qt.Key.Key_Up:
-            self.channel_offset = max(0, self.channel_offset - 1)
-            self._validate_and_plot()
+            # Only scroll if possible, and always keep visible_channels constant
+            if self.channel_offset > 0:
+                self.channel_offset -= 1
+                self._validate_and_plot()
         elif key == Qt.Key.Key_Down:
-            self.channel_offset = min(max(0, self.total_channels - self.visible_channels), self.channel_offset + 1)
-            self._validate_and_plot()
+            max_offset = max(0, self.total_channels - self.visible_channels)
+            if self.channel_offset < max_offset:
+                self.channel_offset += 1
+                self._validate_and_plot()
         else:
             super().keyPressEvent(event)
 
