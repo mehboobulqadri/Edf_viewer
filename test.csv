@@ -1,0 +1,4 @@
+onset,duration,description,system_time,channel
+10.0,2.0,Label1,2025-08-05 15:30:00,
+20.0,0.0,Marker1,2025-08-05 15:31:00,
+30.0,5.0,Highlight,2025-08-05 15:32:00,EEG Fp1-F7

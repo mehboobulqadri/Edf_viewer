@@ -7,13 +7,13 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import (
-    QDoubleValidator, QFont, QKeySequence, QAction, QColor
+    QDoubleValidator, QFont, QKeySequence, QAction, QColor, QKeyEvent
 )
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLineEdit, QLabel, QScrollBar, QStatusBar,
     QComboBox, QMessageBox, QDialog, QListWidget, QListWidgetItem,
-    QInputDialog, QSlider, QColorDialog
+    QInputDialog, QSlider, QColorDialog, QGroupBox, QSplitter
 )
 import time
 import logging
@@ -31,6 +31,82 @@ mpl.rcParams['figure.autolayout'] = True
 logging.basicConfig(level=logging.ERROR,
                     format='%(asctime)s - %(levelname)s - %(message)s',
                     filename='edf_viewer_errors.log')
+
+class ChannelSelectionDialog(QDialog):
+    def __init__(self, raw, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Channel Selection")
+        self.resize(600, 800)
+        self.raw = raw
+        self.selected_channels = parent.channel_indices if hasattr(parent, 'channel_indices') and parent.channel_indices else list(range(len(raw.ch_names)))
+
+        main_layout = QVBoxLayout(self)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+
+        available_group = QGroupBox("Available Channels")
+        available_layout = QVBoxLayout()
+        self.available_list = QListWidget()
+        # FIX: Use correct selection mode enum for PyQt6
+        self.available_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        available_layout.addWidget(self.available_list)
+        available_group.setLayout(available_layout)
+
+        selected_group = QGroupBox("Selected Channels (Drag to reorder)")
+        selected_layout = QVBoxLayout()
+        self.selected_list = QListWidget()
+        self.selected_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.selected_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        selected_layout.addWidget(self.selected_list)
+        selected_group.setLayout(selected_layout)
+
+        selected_set = set(self.selected_channels)
+        for i, ch_name in enumerate(raw.ch_names):
+            item = QListWidgetItem(ch_name)
+            item.setData(Qt.ItemDataRole.UserRole, i)
+            if i in selected_set:
+                self.selected_list.addItem(item)
+            else:
+                self.available_list.addItem(item)
+
+        splitter.addWidget(available_group)
+        splitter.addWidget(selected_group)
+        splitter.setSizes([300, 500])
+
+        button_layout = QHBoxLayout()
+        self.add_button = QPushButton("→ Add")
+        self.remove_button = QPushButton("← Remove")
+        self.ok_button = QPushButton("OK")
+        self.cancel_button = QPushButton("Cancel")
+        button_layout.addWidget(self.add_button)
+        button_layout.addWidget(self.remove_button)
+        button_layout.addStretch()
+        button_layout.addWidget(self.ok_button)
+        button_layout.addWidget(self.cancel_button)
+
+        self.add_button.clicked.connect(self.add_channels)
+        self.remove_button.clicked.connect(self.remove_channels)
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+        main_layout.addWidget(splitter)
+        main_layout.addLayout(button_layout)
+
+    def add_channels(self):
+        for item in self.available_list.selectedItems():
+            self.selected_list.addItem(self.available_list.takeItem(self.available_list.row(item)))
+
+    def remove_channels(self):
+        for item in self.selected_list.selectedItems():
+            self.available_list.addItem(self.selected_list.takeItem(self.selected_list.row(item)))
+
+    def get_selected_channels(self):
+        return [self.selected_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.selected_list.count())]
+
+    def accept(self):
+        if self.selected_list.count() == 0:
+            QMessageBox.warning(self, "Invalid Selection", "You must select at least one channel to continue.")
+            return
+        super().accept()
 
 class HighlightSectionDialog(QDialog):
     def __init__(self, raw, channel_names, parent=None):
@@ -214,6 +290,12 @@ class EDFViewer(QMainWindow):
         self.setCentralWidget(main_widget)
         self.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.canvas.mpl_connect('button_press_event', self.on_click)
+
+    def on_click(self, event):
+        if self.raw is None or event.xdata is None:
+            return
+        self.focus_start_time = event.xdata - (self.focus_duration / 2.0)
+        self._validate_and_plot()
 
     def setup_menus(self):
         self.file_menu = self.menuBar().addMenu("File")
@@ -501,34 +583,34 @@ class EDFViewer(QMainWindow):
             QMessageBox.critical(self, "Plot Error", f"Failed to plot EEG data:\n{e}")
 
     def keyPressEvent(self, event):
+        # Use Qt.Key enum from PyQt6.QtCore.Qt.Key
+        key = event.key()
+        # PyQt6: Key enums are in Qt.Key.Key_*
         if self.raw is None or self.duration_input.hasFocus() or self.step_input.hasFocus():
             super().keyPressEvent(event)
             return
         pan_amount = self.view_duration * 0.1
-        if event.key() == Qt.Key.Key_Right:
-            self.view_start_time += pan_amount
-        elif event.key() == Qt.Key.Key_Left:
-            self.view_start_time -= pan_amount
-        elif event.key() == Qt.Key.Key_Up:
+        if key == Qt.Key.Key_Right:
+            max_time = self.raw.n_times / self.raw.info['sfreq']
+            self.view_start_time = min(self.view_start_time + pan_amount, max_time - self.view_duration)
+            self._validate_and_plot()
+        elif key == Qt.Key.Key_Left:
+            self.view_start_time = max(self.view_start_time - pan_amount, 0)
+            self._validate_and_plot()
+        elif key == Qt.Key.Key_Up:
             self.channel_offset = max(0, self.channel_offset - 1)
-        elif event.key() == Qt.Key.Key_Down:
+            self._validate_and_plot()
+        elif key == Qt.Key.Key_Down:
             self.channel_offset = min(max(0, self.total_channels - self.visible_channels), self.channel_offset + 1)
+            self._validate_and_plot()
         else:
             super().keyPressEvent(event)
-            return
-        self._validate_and_plot()
 
     def on_scroll(self, event):
         if self.raw is None or event.inaxes is None:
             return
         new_duration = self.view_duration / self.zoom_factor if event.button == 'up' else self.view_duration * self.zoom_factor
         self.view_duration = new_duration
-        self._validate_and_plot()
-
-    def on_click(self, event):
-        if self.raw is None or event.xdata is None:
-            return
-        self.focus_start_time = event.xdata - (self.focus_duration / 2.0)
         self._validate_and_plot()
 
     def next_focus(self):
@@ -758,11 +840,45 @@ class EDFViewer(QMainWindow):
         self.hscroll.setPageStep(int(self.view_duration * 100))
         self.hscroll.setValue(int(self.view_start_time * 100))
         self.hscroll.setEnabled(h_max > 0)
-        max_offset = max(0, self.total_channels - self.visible_channels)
-        self.vscroll.setRange(0, max_offset)
-        self.vscroll.setPageStep(self.visible_channels)
-        self.vscroll.setValue(self.channel_offset)
-        self.vscroll.setEnabled(max_offset > 0)
+       
+class ChannelColorDialog(QDialog):
+    def __init__(self, raw, channel_colors, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Set Channel Colors")
+        self.resize(400, 600)
+        self.raw = raw
+        self.channel_colors = channel_colors.copy()
+
+        layout = QVBoxLayout(self)
+        self.color_list = QListWidget()
+        for ch_name in raw.ch_names:
+            color = self.channel_colors.get(ch_name, QColor('black'))
+            item = QListWidgetItem(ch_name)
+            item.setBackground(color)
+            self.color_list.addItem(item)
+        self.color_list.itemClicked.connect(self.change_color)
+        layout.addWidget(self.color_list)
+
+        button_layout = QHBoxLayout()
+        self.ok_button = QPushButton("OK")
+        self.cancel_button = QPushButton("Cancel")
+        button_layout.addStretch()
+        button_layout.addWidget(self.ok_button)
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+
+        self.ok_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+
+    def change_color(self, item):
+        ch_name = item.text()
+        color = QColorDialog.getColor(self.channel_colors.get(ch_name, QColor('black')), self, f"Select Color for {ch_name}")
+        if color.isValid():
+            self.channel_colors[ch_name] = color
+            item.setBackground(color)
+
+    def get_channel_colors(self):
+        return self.channel_colors
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

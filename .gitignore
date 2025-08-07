@@ -30,6 +30,7 @@ wheels/
 MANIFEST
 .log
 edf_viewer_errors.log
+.csv
 
 # VS Code
 .vscode/
