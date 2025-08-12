@@ -31,10 +31,17 @@ MANIFEST
 .log
 edf_viewer_errors.log
 .csv
-
+./csv
 # VS Code
 .vscode/
 .history/
+/.zencoder
+
+/sessions
+/sessions/
+/exports
+/exports/
+
 
 # MNE sample data (let MNE re-download it if needed)
 /mne_data/
