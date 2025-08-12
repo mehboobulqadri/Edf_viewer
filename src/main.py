@@ -1,4 +1,3 @@
-# main.py — corrected version
 import sys
 import mne
 import numpy as np
