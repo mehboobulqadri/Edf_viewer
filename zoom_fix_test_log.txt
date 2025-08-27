@@ -1,0 +1,7 @@
+2025-08-27 16:10:19 - ✓ PASS - Test Session Started - Running comprehensive verification
+2025-08-27 16:10:23 - ✓ PASS - Module Import - main.py imports successfully
+2025-08-27 16:10:23 - ✓ PASS - EDFViewer Initialization - Class instantiated with correct flags
+2025-08-27 16:10:23 - ✓ PASS - Zoom Preservation Logic - Preservation flag working correctly
+2025-08-27 16:10:24 - ✓ PASS - Eye Tracker Detection - Found 1 devices (0 is normal without hardware)
+2025-08-27 16:10:24 - ✗ FAIL - Hardware Detection Methods - USB: ✗, Processes: ✓
+2025-08-27 16:10:24 - ✗ FAIL - Overall Result - 1 tests failed

@@ -31,6 +31,21 @@ from PyQt6.QtWidgets import (
     QMenu, QInputDialog, QGridLayout, QGraphicsRectItem
 )
 
+# Gaze tracking imports (Complete Phase 1-4 integration)
+try:
+    from gaze_tracking.gaze_tracker import GazeTracker
+    from gaze_tracking.gaze_processor import GazeProcessor, FixationDetector
+    from gaze_tracking.gaze_annotator import GazeAnnotator
+    from gaze_tracking.gaze_enhanced_auto_move import GazeEnhancedAutoMove
+    from ui.gaze_mode_dialog import GazeModeSetupDialog
+    from ui.gaze_overlay import GazeOverlayManager
+    from ui.feedback_system import FeedbackSystem
+    from utils.gaze_analytics import ContextAnalyzer, BehaviorAnalyzer
+    GAZE_TRACKING_AVAILABLE = True
+except ImportError as e:
+    print(f"Gaze tracking components not available: {e}")
+    GAZE_TRACKING_AVAILABLE = False
+
 # Enhanced PyQtGraph configuration for maximum performance
 pg.setConfigOptions(
     useOpenGL=True,
@@ -981,6 +996,8 @@ class EDFViewer(QMainWindow):
         self.auto_sensitivity = True
         self.auto_move_active = False
         self._updating_scrollbar = False  # Flag to prevent recursive updates
+        self._preserving_zoom = False  # Flag to prevent zoom changes during navigation
+        self._updating_combo = False  # Flag to prevent recursive combo box updates
         self.annotation_manager = AnnotationManager()
         self.plot_items = {}
         self.separator_lines = []
@@ -993,6 +1010,18 @@ class EDFViewer(QMainWindow):
         self._channel_offset_buffer = None
         self.drag_start_time = None
         self.drag_channel = None
+        
+        # Gaze tracking components (Complete Phase 1-4 integration)
+        self.gaze_tracker = None
+        self.gaze_processor = None
+        self.gaze_annotator = None
+        self.gaze_overlay_manager = None
+        self.feedback_system = None
+        self.enhanced_auto_move = None
+        self.context_analyzer = None
+        self.behavior_analyzer = None
+        self.gaze_mode_active = False
+        
         self.setup_ui()
         self.setup_menus()
         self.setup_toolbar()
@@ -1124,6 +1153,11 @@ class EDFViewer(QMainWindow):
         color_select_action = QAction('Set Channel Colors', self)
         color_select_action.triggered.connect(self.open_color_selection)
         tools_menu.addAction(color_select_action)
+        
+        # Gaze tracking menu (Phase 1 integration)
+        if GAZE_TRACKING_AVAILABLE:
+            self.setup_gaze_menu(menubar)
+        
         help_menu = menubar.addMenu('Help')
         shortcuts_action = QAction('Keyboard Shortcuts', self)
         shortcuts_action.triggered.connect(self.show_shortcuts)
@@ -1571,6 +1605,22 @@ class EDFViewer(QMainWindow):
 
     def update_time_scale(self, value):
         """Update time scale from combo box selection"""
+        # Check if we're in zoom-preserving mode or updating combo internally
+        if self._preserving_zoom:
+            return  # Ignore time scale changes when preserving zoom
+            
+        if self._updating_combo:
+            return  # Ignore time scale changes when updating combo box display
+        
+        # NEW: Check if the requested value matches current zoom - if so, ignore it
+        # This prevents combo box updates from resetting zoom unnecessarily
+        try:
+            requested_time = float(value.replace('s', '')) if 's' in value else float(value.replace('m', '')) * 60
+            if abs(requested_time - self.view_duration) < 0.01:  # If it's essentially the same
+                return  # Don't change zoom if it's already at this level
+        except:
+            pass  # If parsing fails, continue with original logic
+            
         try:
             time_val = float(value.replace('s', '')) if 's' in value else float(value.replace('m', '')) * 60
             
@@ -1589,51 +1639,64 @@ class EDFViewer(QMainWindow):
         if not hasattr(self, 'time_combo'):
             return
             
-        # Temporarily disconnect the signal to prevent recursive updates
-        self.time_combo.currentTextChanged.disconnect(self.update_time_scale)
+        # Skip if we're already in zoom preservation mode to prevent conflicts
+        if self._preserving_zoom:
+            return
+            
+        # Set internal flag to prevent recursive updates
+        self._updating_combo = True
         
-        # Find the closest predefined value or add a custom one
-        current_duration = self.view_duration
-        predefined_values = ["5s", "10s", "15s", "20s", "30s", "1m", "2m", "5m"]
-        predefined_seconds = [5, 10, 15, 20, 30, 60, 120, 300]
-        
-        # Check if current duration matches any predefined value (within 0.1s tolerance)
-        closest_match = None
-        for i, seconds in enumerate(predefined_seconds):
-            if abs(current_duration - seconds) < 0.1:
-                closest_match = predefined_values[i]
-                break
-        
-        if closest_match:
-            # Set to the closest predefined value
-            self.time_combo.setCurrentText(closest_match)
-        else:
-            # Add custom value if it doesn't exist
-            if current_duration < 60:
-                custom_text = f"{current_duration:.1f}s"
+        try:
+            # Temporarily disconnect the signal to prevent recursive updates
+            self.time_combo.currentTextChanged.disconnect(self.update_time_scale)
+            
+            # Find the closest predefined value or add a custom one
+            current_duration = self.view_duration
+            predefined_values = ["5s", "10s", "15s", "20s", "30s", "1m", "2m", "5m"]
+            predefined_seconds = [5, 10, 15, 20, 30, 60, 120, 300]
+            
+            # Check if current duration matches any predefined value (within 0.1s tolerance)
+            closest_match = None
+            for i, seconds in enumerate(predefined_seconds):
+                if abs(current_duration - seconds) < 0.1:
+                    closest_match = predefined_values[i]
+                    break
+            
+            if closest_match:
+                # Set to the closest predefined value
+                self.time_combo.setCurrentText(closest_match)
             else:
-                custom_text = f"{current_duration/60:.1f}m"
-            
-            # Check if this custom value already exists
-            if self.time_combo.findText(custom_text) == -1:
-                # Remove any previous custom values (they start with numbers not in predefined list)
-                for i in range(self.time_combo.count() - 1, -1, -1):
-                    text = self.time_combo.itemText(i)
-                    if text not in predefined_values:
-                        self.time_combo.removeItem(i)
+                # Add custom value if it doesn't exist
+                if current_duration < 60:
+                    custom_text = f"{current_duration:.1f}s"
+                else:
+                    custom_text = f"{current_duration/60:.1f}m"
                 
-                # Add the new custom value
-                self.time_combo.addItem(custom_text)
-            
-            self.time_combo.setCurrentText(custom_text)
-        
-        # Reconnect the signal
-        self.time_combo.currentTextChanged.connect(self.update_time_scale)
+                # Check if this custom value already exists
+                if self.time_combo.findText(custom_text) == -1:
+                    # Remove any previous custom values (they start with numbers not in predefined list)
+                    for i in range(self.time_combo.count() - 1, -1, -1):
+                        text = self.time_combo.itemText(i)
+                        if text not in predefined_values:
+                            self.time_combo.removeItem(i)
+                    
+                    # Add the new custom value
+                    self.time_combo.addItem(custom_text)
+                
+                self.time_combo.setCurrentText(custom_text)
+                
+        finally:
+            # Always reconnect the signal and clear the flag
+            self.time_combo.currentTextChanged.connect(self.update_time_scale)
+            self._updating_combo = False
     
     def _navigate_preserving_zoom(self, direction):
         """Navigate while absolutely preserving zoom level"""
         # Store current zoom
         preserved_zoom = self.view_duration
+        
+        # Set zoom preservation flag
+        self._preserving_zoom = True
         
         # Temporarily disconnect all signals that might affect zoom
         self.time_combo.currentTextChanged.disconnect(self.update_time_scale)
@@ -1664,7 +1727,13 @@ class EDFViewer(QMainWindow):
             # Update display
             self.perf_manager.request_update()
             
+            # Update combo box to reflect preserved zoom (without triggering signal)
+            self.update_time_combo_display()
+            
         finally:
+            # Clear zoom preservation flag
+            self._preserving_zoom = False
+            
             # Always reconnect signals
             self.time_combo.currentTextChanged.connect(self.update_time_scale)
             self.hscroll.valueChanged.connect(self.update_time_offset)
@@ -1680,14 +1749,21 @@ class EDFViewer(QMainWindow):
             return
         preserved_zoom = self.view_duration
         
-        self.focus_start_time = max(0, self.focus_start_time - self.focus_duration)
-        if self.focus_start_time < self.view_start_time:
-            self.view_start_time = max(0, self.focus_start_time - self.view_duration * 0.1)
-            self.update_scrollbars()
+        # Set zoom preservation flag
+        self._preserving_zoom = True
         
-        # Force zoom preservation
-        self.view_duration = preserved_zoom
-        self.perf_manager.request_update()
+        try:
+            self.focus_start_time = max(0, self.focus_start_time - self.focus_duration)
+            if self.focus_start_time < self.view_start_time:
+                self.view_start_time = max(0, self.focus_start_time - self.view_duration * 0.1)
+                self.update_scrollbars()
+            
+            # Force zoom preservation
+            self.view_duration = preserved_zoom
+            self.perf_manager.request_update()
+        finally:
+            # Clear zoom preservation flag
+            self._preserving_zoom = False
     
     def _next_section_preserving_zoom(self):
         """Next section while preserving zoom"""
@@ -1695,15 +1771,22 @@ class EDFViewer(QMainWindow):
             return
         preserved_zoom = self.view_duration
         
-        max_time = self.raw.n_times / self.raw.info['sfreq']
-        self.focus_start_time = min(max_time - self.focus_duration, self.focus_start_time + self.focus_duration)
-        if self.focus_start_time + self.focus_duration > self.view_start_time + self.view_duration:
-            self.view_start_time = min(max_time - self.view_duration, self.focus_start_time - self.view_duration * 0.1)
-            self.update_scrollbars()
+        # Set zoom preservation flag
+        self._preserving_zoom = True
         
-        # Force zoom preservation
-        self.view_duration = preserved_zoom
-        self.perf_manager.request_update()
+        try:
+            max_time = self.raw.n_times / self.raw.info['sfreq']
+            self.focus_start_time = min(max_time - self.focus_duration, self.focus_start_time + self.focus_duration)
+            if self.focus_start_time + self.focus_duration > self.view_start_time + self.view_duration:
+                self.view_start_time = min(max_time - self.view_duration, self.focus_start_time - self.view_duration * 0.1)
+                self.update_scrollbars()
+            
+            # Force zoom preservation
+            self.view_duration = preserved_zoom
+            self.perf_manager.request_update()
+        finally:
+            # Clear zoom preservation flag
+            self._preserving_zoom = False
 
     def update_focus_duration(self):
         try:
@@ -1851,27 +1934,38 @@ class EDFViewer(QMainWindow):
         if not hasattr(self, 'visible_ch_names') or from_index == to_index:
             return
             
-        # Get the current channel order from channel_indices
-        current_visible_indices = [self.channel_indices[self.channel_offset + i] 
-                                 for i in range(min(len(self.visible_ch_names), 
-                                                   len(self.channel_indices) - self.channel_offset))]
+        # Preserve zoom during channel reordering
+        preserved_zoom = self.view_duration
+        self._preserving_zoom = True
         
-        if from_index >= len(current_visible_indices) or to_index >= len(current_visible_indices):
-            return
+        try:
+            # Get the current channel order from channel_indices
+            current_visible_indices = [self.channel_indices[self.channel_offset + i] 
+                                     for i in range(min(len(self.visible_ch_names), 
+                                                       len(self.channel_indices) - self.channel_offset))]
             
-        # Move the channel
-        moved_index = current_visible_indices.pop(from_index)
-        current_visible_indices.insert(to_index, moved_index)
-        
-        # Update the main channel_indices array
-        for i, idx in enumerate(current_visible_indices):
-            if self.channel_offset + i < len(self.channel_indices):
-                self.channel_indices[self.channel_offset + i] = idx
-        
-        # Refresh the display
-        self.create_plot_items()
-        self.perf_manager.request_update()
-        self.auto_export_csv()  # Auto-export when channel order changes
+            if from_index >= len(current_visible_indices) or to_index >= len(current_visible_indices):
+                return
+                
+            # Move the channel
+            moved_index = current_visible_indices.pop(from_index)
+            current_visible_indices.insert(to_index, moved_index)
+            
+            # Update the main channel_indices array
+            for i, idx in enumerate(current_visible_indices):
+                if self.channel_offset + i < len(self.channel_indices):
+                    self.channel_indices[self.channel_offset + i] = idx
+            
+            # Refresh the display
+            self.create_plot_items()
+            self.perf_manager.request_update()
+            self.auto_export_csv()  # Auto-export when channel order changes
+            
+            # Force zoom back to preserved value
+            self.view_duration = preserved_zoom
+            
+        finally:
+            self._preserving_zoom = False
         
         # Show feedback
         from_ch = self.visible_ch_names[from_index] if from_index < len(self.visible_ch_names) else "Unknown"
@@ -1890,10 +1984,21 @@ class EDFViewer(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             annotation_info = dialog.get_annotation_info()
             if annotation_info:
-                start, dur, description, color = annotation_info
-                self.annotation_manager.add_annotation(start, dur, description, color)
-                self.perf_manager.request_update()
-                self.auto_export_csv()  # Auto-export when annotations change
+                # Preserve zoom during annotation creation
+                preserved_zoom = self.view_duration
+                self._preserving_zoom = True
+                
+                try:
+                    start, dur, description, color = annotation_info
+                    self.annotation_manager.add_annotation(start, dur, description, color)
+                    self.perf_manager.request_update()
+                    self.auto_export_csv()  # Auto-export when annotations change
+                    
+                    # Force zoom back to preserved value
+                    self.view_duration = preserved_zoom
+                    
+                finally:
+                    self._preserving_zoom = False
 
     def show_highlight_creation_dialog(self, start_time, duration, channel=None):
         dialog = HighlightSectionDialog(self.raw, self.visible_ch_names, self)
@@ -1904,12 +2009,23 @@ class EDFViewer(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             highlight_info = dialog.get_highlight_info()
             if highlight_info:
-                ch_name, start, dur, color, description = highlight_info
-                self.annotation_manager.add_highlight(ch_name, start, dur, color, description)
-                # Force immediate update for highlights
-                self.update_annotations()  # Update annotations display immediately
-                self.perf_manager.request_update()
-                self.auto_export_csv()  # Auto-export when annotations change
+                # Preserve zoom during highlight creation
+                preserved_zoom = self.view_duration
+                self._preserving_zoom = True
+                
+                try:
+                    ch_name, start, dur, color, description = highlight_info
+                    self.annotation_manager.add_highlight(ch_name, start, dur, color, description)
+                    # Force immediate update for highlights
+                    self.update_annotations()  # Update annotations display immediately
+                    self.perf_manager.request_update()
+                    self.auto_export_csv()  # Auto-export when annotations change
+                    
+                    # Force zoom back to preserved value
+                    self.view_duration = preserved_zoom
+                    
+                finally:
+                    self._preserving_zoom = False
 
     def show_annotation_context_menu(self, event, annotation):
         menu = QMenu(self)
@@ -2260,7 +2376,12 @@ class EDFViewer(QMainWindow):
                         self.load_file(session_data['file_path'])
                         return
                 self.view_start_time = session_data.get('view_start_time', 0.0)
-                self.view_duration = session_data.get('view_duration', 10.0)
+                # Set zoom preservation flag when loading session to prevent interference
+                self._preserving_zoom = True
+                try:
+                    self.view_duration = session_data.get('view_duration', 10.0)
+                finally:
+                    self._preserving_zoom = False
                 self.focus_start_time = session_data.get('focus_start_time', 0.0)
                 self.focus_duration = session_data.get('focus_duration', 1.0)
                 self.channel_indices = session_data.get('channel_indices', list(range(len(self.raw.ch_names))))
@@ -2430,19 +2551,35 @@ class EDFViewer(QMainWindow):
         modifiers = event.modifiers()
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             if key == Qt.Key.Key_Plus:
-                zoom_factor = 0.9
-                self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
-                self.update_time_combo_display()  # Update combo box to show current zoom
-                self.update_scrollbars()
-                self.perf_manager.request_update()
-                self.auto_export_csv()  # Auto-export when zoom changes
+                # Set zoom preservation flag to prevent interference
+                self._preserving_zoom = True
+                
+                try:
+                    zoom_factor = 0.9
+                    self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
+                    self.update_time_combo_display()  # Update combo box to show current zoom
+                    self.update_scrollbars()
+                    self.perf_manager.request_update()
+                    self.auto_export_csv()  # Auto-export when zoom changes
+                finally:
+                    # Clear zoom preservation flag
+                    self._preserving_zoom = False
+                    
             elif key == Qt.Key.Key_Minus:
-                zoom_factor = 1.1
-                self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
-                self.update_time_combo_display()  # Update combo box to show current zoom
-                self.update_scrollbars()
-                self.perf_manager.request_update()
-                self.auto_export_csv()  # Auto-export when zoom changes
+                # Set zoom preservation flag to prevent interference
+                self._preserving_zoom = True
+                
+                try:
+                    zoom_factor = 1.1
+                    self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
+                    self.update_time_combo_display()  # Update combo box to show current zoom
+                    self.update_scrollbars()
+                    self.perf_manager.request_update()
+                    self.auto_export_csv()  # Auto-export when zoom changes
+                finally:
+                    # Clear zoom preservation flag
+                    self._preserving_zoom = False
+                    
             else:
                 super().keyPressEvent(event)
             return
@@ -2486,12 +2623,20 @@ class EDFViewer(QMainWindow):
             self.vscroll.setValue(self.channel_offset)
             event.accept()
         elif modifiers == Qt.KeyboardModifier.ControlModifier:
-            zoom_factor = 0.9 if delta > 0 else 1.1
-            self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
-            self.update_time_combo_display()  # Update combo box to show current zoom
-            self.update_scrollbars()
-            self.perf_manager.request_update()
-            self.auto_export_csv()  # Auto-export when zoom changes
+            # Set zoom preservation flag to prevent interference
+            self._preserving_zoom = True
+            
+            try:
+                zoom_factor = 0.9 if delta > 0 else 1.1
+                self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
+                self.update_time_combo_display()  # Update combo box to show current zoom
+                self.update_scrollbars()
+                self.perf_manager.request_update()
+                self.auto_export_csv()  # Auto-export when zoom changes
+            finally:
+                # Clear zoom preservation flag
+                self._preserving_zoom = False
+                
             event.accept()
         elif modifiers == Qt.KeyboardModifier.AltModifier:
             time_shift = (self.view_duration * 0.1) * (-1 if delta > 0 else 1)
@@ -2501,6 +2646,69 @@ class EDFViewer(QMainWindow):
             self.update_scrollbars()
             self.perf_manager.request_update()
             event.accept()
+
+    # Gaze tracking methods (Phase 1 integration)
+    def setup_gaze_menu(self, menubar):
+        """Add gaze tracking menu to existing menu bar."""
+        gaze_menu = menubar.addMenu('Gaze Tracking')
+        
+        start_action = QAction('Start Gaze Annotation Mode', self)
+        start_action.triggered.connect(self.show_gaze_mode_dialog)
+        gaze_menu.addAction(start_action)
+        
+        calibrate_action = QAction('Calibrate Eye Tracker', self)
+        calibrate_action.triggered.connect(self.launch_calibration_tool)
+        gaze_menu.addAction(calibrate_action)
+        
+        gaze_menu.addSeparator()
+        
+        status_action = QAction('Show Gaze Status', self)
+        status_action.triggered.connect(self.show_gaze_status)
+        gaze_menu.addAction(status_action)
+    
+    def show_gaze_mode_dialog(self):
+        """Show gaze mode setup dialog."""
+        if not self.raw:
+            QMessageBox.warning(self, "No Data", "Please load an EDF file first.")
+            return
+        
+        try:
+            dialog = GazeModeSetupDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                config = dialog.get_configuration()
+                self.start_gaze_annotation_mode(config)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to show gaze mode dialog: {str(e)}")
+            logging.error(f"Gaze mode dialog error: {e}")
+    
+    def start_gaze_annotation_mode(self, config):
+        """Start gaze annotation mode with given configuration."""
+        # Implementation will be added in future phases
+        QMessageBox.information(self, "Gaze Mode", 
+                              f"Gaze annotation mode would start with configuration:\n"
+                              f"• Time scale: {config['display']['time_scale']}s\n"
+                              f"• Channels: {config['display']['channel_count']}\n"
+                              f"• Fixation duration: {config['gaze_detection']['fixation_duration']}s\n"
+                              f"• Mock mode: {config['hardware']['use_mock']}\n\n"
+                              f"Full implementation coming in Phase 2-4!")
+        logging.info("Gaze annotation mode started (Phase 1 placeholder)")
+    
+    def launch_calibration_tool(self):
+        """Launch separate calibration application."""
+        # Implementation will be added in Phase 7
+        QMessageBox.information(self, "Calibration Tool", 
+                              "Calibration tool will be available in Phase 7 of the implementation.")
+        logging.info("Calibration tool requested (Phase 7 placeholder)")
+    
+    def show_gaze_status(self):
+        """Show gaze tracking status information."""
+        status_msg = "Gaze Tracking Status:\n\n"
+        status_msg += f"• Gaze mode active: {self.gaze_mode_active}\n"
+        status_msg += f"• Tracker connected: {self.gaze_tracker is not None}\n"
+        status_msg += f"• Phase 1 implementation: Basic integration complete\n"
+        status_msg += f"• Next phases: Hardware integration, UI components, annotation logic"
+        
+        QMessageBox.information(self, "Gaze Status", status_msg)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
