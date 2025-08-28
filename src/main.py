@@ -750,19 +750,29 @@ class CustomViewBox(pg.ViewBox):
         self.setMouseMode(self.RectMode)
 
     def mouseDragEvent(self, ev, axis=None):
-        if ev.button() == Qt.MouseButton.LeftButton:
-            pos = self.mapSceneToView(ev.scenePos())
+        if ev.button() != Qt.MouseButton.LeftButton:
+            return super().mouseDragEvent(ev, axis)
+
+        pos = self.mapSceneToView(ev.scenePos())
+
+        # FIX: Get view range for boundary checks
+        view_range = self.viewRange()[0]
+        view_width = view_range[1] - view_range[0]
+
+        # Check if in reordering area (near left edge) or Shift for annotation
+        is_reorder_area = pos.x() < view_range[0] + view_width * 0.1
+        is_annotation = ev.modifiers() & Qt.KeyboardModifier.ShiftModifier
+
+        if is_reorder_area or is_annotation:
+            # Perform custom drag for reordering or annotation
             if ev.isStart():
                 self.dragStart.emit(pos)
             elif ev.isFinish():
                 self.dragFinish.emit(pos)
             ev.accept()
         else:
-            # Pass axis parameter to parent if provided
-            if axis is not None:
-                super().mouseDragEvent(ev)
-            else:
-                super().mouseDragEvent(ev)
+            # Allow standard rectangular zoom
+            super().mouseDragEvent(ev, axis)
 
 class HighPerformanceDataCache:
     def __init__(self, max_size_mb=PERF_CONFIG['cache_size_mb']):
@@ -851,15 +861,27 @@ class HighPerformanceSignalProcessor:
         if data.size == 0:
             return data, 1.0
         try:
-            data_abs = np.abs(data)
-            scale_factor = np.percentile(data_abs, percentile)
-            if scale_factor > 0:
+            # FIX: Per-channel scaling to handle varying amplitudes
+            if data.ndim == 2:
+                data_abs = np.abs(data)
+                scale_factors = np.percentile(data_abs, percentile, axis=1)
+                scale_factors[scale_factors == 0] = 1.0  # Prevent division by zero
+                scaled_data = data / scale_factors[:, np.newaxis]
+                max_vals = np.percentile(np.abs(scaled_data), 99, axis=1)
+                for i in range(data.shape[0]):
+                    if max_vals[i] > target_range[1]:
+                        scaled_data[i] *= (target_range[1] / max_vals[i])
+                return scaled_data, scale_factors
+            else:
+                data_abs = np.abs(data)
+                scale_factor = np.percentile(data_abs, percentile)
+                if scale_factor == 0:
+                    scale_factor = 1.0
                 scaled_data = data / scale_factor
                 max_val = np.percentile(np.abs(scaled_data), 99)
                 if max_val > target_range[1]:
-                    scaled_data = scaled_data * (target_range[1] / max_val)
+                    scaled_data *= (target_range[1] / max_val)
                 return scaled_data, scale_factor
-            return data, 1.0
         except Exception as e:
             logging.error(f"Adaptive scaling error: {e}")
             return data, 1.0
@@ -1001,6 +1023,19 @@ class EDFViewer(QMainWindow):
         self.auto_save_timer = QTimer()
         self.auto_save_timer.timeout.connect(self.auto_save)
         self.auto_save_timer.start(300000)
+
+        # FIX: Connect to X-range changes to sync state (prevents reset after panning)
+        self.view_box.sigXRangeChanged.connect(self.on_xrange_changed)
+
+    def on_xrange_changed(self, vb, xr):
+        new_start, new_end = xr
+        new_duration = new_end - new_start
+        # Update only if significantly different to prevent feedback loops
+        if abs(new_start - self.view_start_time) > 1e-4 or abs(new_duration - self.view_duration) > 1e-4:
+            self.view_start_time = new_start
+            self.view_duration = new_duration
+            self.update_time_combo_display()
+            self.update_scrollbars()
 
     def setup_ui(self):
         main_widget = QWidget()
@@ -1272,9 +1307,13 @@ class EDFViewer(QMainWindow):
         if not self.raw or not self.channel_indices:
             return
         try:
+            # FIX: If auto_sensitivity enabled, compute optimal sensitivity from current view data
             start_sample = int(self.view_start_time * self.raw.info['sfreq'])
             end_sample = int((self.view_start_time + self.view_duration) * self.raw.info['sfreq'])
-            end_sample = min(end_sample, self.raw.n_times)
+            end_sample = min(end_sample, self.raw.n_times)  # Clamp to data length
+            max_time = self.raw.n_times / self.raw.info['sfreq']
+            effective_end_time = min(self.view_start_time + self.view_duration, max_time)
+
             if start_sample >= end_sample:
                 return
             start_ch = self.channel_offset
@@ -1288,10 +1327,21 @@ class EDFViewer(QMainWindow):
             cached_data = self.data_cache.get(cache_key)
             if cached_data is None:
                 data, times = self.raw.get_data(picks=visible_indices, start=start_sample, stop=end_sample, return_times=True)
-                # No need to add view_start_time - get_data already returns correct absolute times
                 cached_data = (data, times)
                 self.data_cache.put(cache_key, cached_data)
             data, times = cached_data
+
+            if self.auto_sensitivity:
+                # Compute per-channel max amplitude in current view
+                data_abs = np.abs(data)
+                max_amps = np.percentile(data_abs, 98, axis=1)
+                overall_max = np.max(max_amps) if len(max_amps) > 0 else 1.0
+                if overall_max > 0:
+                    # Set sensitivity to fit signals within ~80% of channel height (assuming spacing=2.5, target ±1)
+                    self.sensitivity = 50.0 * (1.0 / overall_max) * 50.0  # Adjust empirically
+                    self.sensitivity = max(10, min(500, self.sensitivity))
+                    self.sensitivity_slider.setValue(int(self.sensitivity))
+                    self.sens_label.setText(f"{self.sensitivity} µV (auto)")
 
             # Intelligent downsample
             data_ds, indices_ds = self.signal_processor.intelligent_downsample(data)
@@ -1371,7 +1421,7 @@ class EDFViewer(QMainWindow):
             self.plot_widget.getAxis('left').setTicks([y_ticks])
 
             # Set view ranges
-            self.plot_widget.setXRange(self.view_start_time, self.view_start_time + self.view_duration, padding=0)
+            self.plot_widget.setXRange(self.view_start_time, effective_end_time, padding=0)
             self.plot_widget.setYRange(-spacing / 2, (num_visible - 1) * spacing + spacing / 2, padding=0)
 
             # Channel separators
@@ -1408,7 +1458,11 @@ class EDFViewer(QMainWindow):
                 pen=pg.mkPen(255, 255, 0, 100),
                 movable=True
             )
-            focus_region.sigRegionChanged.connect(self.on_focus_moved)
+            # FIX: Check if method exists before connecting to avoid AttributeError
+            if hasattr(self, 'on_focus_moved'):
+                focus_region.sigRegionChanged.connect(self.on_focus_moved)
+            else:
+                logging.warning("on_focus_moved not available; skipping connection")
             self.plot_widget.addItem(focus_region)
             self.annotation_items.append(focus_region)
 
@@ -1513,12 +1567,6 @@ class EDFViewer(QMainWindow):
             self.plot_widget.addItem(text)
             self.annotation_items.append(text)
 
-    def on_focus_moved(self, region):
-        start, end = region.getRegion()
-        self.focus_start_time = start
-        self.focus_duration = end - start
-        self.duration_input.setText(f"{self.focus_duration:.1f}")
-
     def update_scrollbars(self):
         if not self.raw or not self.channel_indices:
             self.vscroll.setEnabled(False)
@@ -1532,13 +1580,13 @@ class EDFViewer(QMainWindow):
         self.vscroll.setRange(0, max_offset)
         self.vscroll.setValue(self.channel_offset)
         self.vscroll.setPageStep(max(1, self.visible_channels // 2))
-        self.vscroll.setEnabled(max_offset > 0)
+        self.vscroll.setEnabled(bool(max_offset > 0))  # FIX: Cast to bool to avoid np.bool deprecation
         max_time = self.raw.n_times / self.raw.info['sfreq']
         max_time_offset = max(0, max_time - self.view_duration)
         self.hscroll.setRange(0, int(max_time_offset * 100))
         self.hscroll.setValue(int(self.view_start_time * 100))
         self.hscroll.setPageStep(int(self.view_duration * 50))
-        self.hscroll.setEnabled(max_time_offset > 0)
+        self.hscroll.setEnabled(bool(max_time_offset > 0))  # FIX: Cast to bool to avoid np.bool deprecation
         
         # Clear flag
         self._updating_scrollbar = False
@@ -1554,7 +1602,7 @@ class EDFViewer(QMainWindow):
     def toggle_auto_sensitivity(self, checked):
         self.auto_sensitivity = checked
         if checked:
-            self.perf_manager.request_update()
+            self.perf_manager.request_update()  # Trigger recompute in plot_eeg_data
 
     def update_channels(self, value):
         if value == "All":
@@ -1635,7 +1683,7 @@ class EDFViewer(QMainWindow):
         # Store current zoom
         preserved_zoom = self.view_duration
         
-        # Temporarily disconnect all signals that might affect zoom
+        # Temporarily disconnect signals that might affect zoom
         self.time_combo.currentTextChanged.disconnect(self.update_time_scale)
         self.hscroll.valueChanged.disconnect(self.update_time_offset)
         
@@ -2182,28 +2230,14 @@ class EDFViewer(QMainWindow):
     
     def apply_image_transforms(self, pixmap, settings):
         """Apply brightness and contrast transforms to the pixmap"""
-        # This would require more advanced image processing
-        # For now, we'll skip this implementation
+        # FIX: Stub - implement image processing if needed (e.g., using Pillow or Qt filters)
         pass
 
     def previous_section(self):
-        if not self.raw:
-            return
-        self.focus_start_time = max(0, self.focus_start_time - self.focus_duration)
-        if self.focus_start_time < self.view_start_time:
-            self.view_start_time = max(0, self.focus_start_time - self.view_duration * 0.1)
-            self.update_scrollbars()
-        self.perf_manager.request_update()
+        self._previous_section_preserving_zoom()
 
     def next_section(self):
-        if not self.raw:
-            return
-        max_time = self.raw.n_times / self.raw.info['sfreq']
-        self.focus_start_time = min(max_time - self.focus_duration, self.focus_start_time + self.focus_duration)
-        if self.focus_start_time + self.focus_duration > self.view_start_time + self.view_duration:
-            self.view_start_time = min(max_time - self.view_duration, self.focus_start_time - self.view_duration * 0.1)
-            self.update_scrollbars()
-        self.perf_manager.request_update()
+        self._next_section_preserving_zoom()
 
     def toggle_auto_move(self, checked):
         self.auto_move_active = checked
@@ -2280,7 +2314,7 @@ class EDFViewer(QMainWindow):
                 for highlight in highlights:
                     if len(highlight) < 5:
                         # Old format (ch_name, onset, duration, color) - add default description
-                        highlight = tuple(list(highlight) + ['Highlight'])
+                        highlight = list(highlight) + ['Highlight']
                     self.annotation_manager.section_highlights.append(tuple(highlight))
                 self.sensitivity_slider.setValue(int(self.sensitivity))
                 self.channel_combo.setCurrentText(str(self.visible_channels) if self.visible_channels < self.total_channels else "All")
@@ -2407,7 +2441,8 @@ class EDFViewer(QMainWindow):
             try:
                 df = pd.read_csv(file_path)
                 for _, row in df.iterrows():
-                    if row.get('channel') and pd.notna(row.get('channel')):
+                    channel = row.get('channel')
+                    if channel and pd.notna(channel):
                         # This is a channel highlight
                         description = row.get('description', 'Highlight')
                         color = row.get('color', 'red')
@@ -2473,6 +2508,12 @@ class EDFViewer(QMainWindow):
         else:
             super().keyPressEvent(event)
 
+    def on_focus_moved(self, region):
+        start, end = region.getRegion()
+        self.focus_start_time = start
+        self.focus_duration = end - start
+        self.duration_input.setText(f"{self.focus_duration:.1f}")
+
     def wheelEvent(self, event):
         modifiers = QApplication.keyboardModifiers()
         if not self.raw or event.isAccepted():
@@ -2486,9 +2527,19 @@ class EDFViewer(QMainWindow):
             self.vscroll.setValue(self.channel_offset)
             event.accept()
         elif modifiers == Qt.KeyboardModifier.ControlModifier:
+            # FIX: Center zoom on mouse position
+            mouse_point = self.view_box.mapSceneToView(event.scenePos())
+            old_start = self.view_start_time
+            old_duration = self.view_duration
             zoom_factor = 0.9 if delta > 0 else 1.1
-            self.view_duration = max(0.1, min(3600, self.view_duration * zoom_factor))
-            self.update_time_combo_display()  # Update combo box to show current zoom
+            new_duration = max(0.1, min(3600, old_duration * zoom_factor))
+            rel_pos = (mouse_point.x() - old_start) / old_duration if old_duration > 0 else 0.5
+            new_start = mouse_point.x() - rel_pos * new_duration
+            max_time = self.raw.n_times / self.raw.info['sfreq'] if self.raw else 0
+            new_start = max(0, min(new_start, max_time - new_duration))
+            self.view_start_time = new_start
+            self.view_duration = new_duration
+            self.update_time_combo_display()
             self.update_scrollbars()
             self.perf_manager.request_update()
             self.auto_export_csv()  # Auto-export when zoom changes
